@@ -35,7 +35,7 @@
   <div id="info">
     <b>Forest Exploration: Shivam Sinay Kharangate</b><br>
     Arrows or WASD are for moving the camera, and r is for resetting.<br>
-    cube at origin + one scaled/translated tree instance.
+    cube at the origin + tree, rock, and mountain instances (scaled and translated).
   </div>
 
 <script>
@@ -55,11 +55,11 @@
     pixelGrid[u][v] = color;
   }
 
-  // ---- from first-algo-student.html: cube model ----
 
-  //an array of objects
+  // MODELS
   //    to access the first 'x' coordinate you could type vertices[0].x
-  let vertices = [
+  // cube model
+  let cubeVertices = [
     { x:  1,  y: 1,  z: 1},   // A, idx 0
     { x: -1,  y: 1,  z: 1},   // B, idx 1
     { x:  1,  y: -1, z: 1},   // C, idx 2
@@ -70,8 +70,8 @@
     { x: -1,  y: -1, z: -1}   // H, idx 7
   ];
 
-  // an array of the indics for the two vertices in each edge
-  let edges = [
+  // an array of the indices for the two vertices in each edge
+  let cubeEdges = [
     [0, 1], //AB
     [0, 2], //AC
     [0, 4], //AE
@@ -113,8 +113,45 @@
     [8,12],[9,12],[10,12],[11,12]
   ];
 
-  // tree instance in world space, scaled and translated from object space
-  let tree = { x: 3, y: 0, z: 0, scale: 1.5 };
+  // rock model
+  let rockVertices = [
+    { x: 0.6, y: 0.1, z: 0.4 },
+    { x:-0.5, y: 0.1, z: 0.5 },
+    { x: 0.2, y: 0,   z:-0.5 },
+    { x:-0.4, y: 0.1, z:-0.3 },
+    { x: 0,   y: 0.6, z: 0 },
+    { x: 0,   y: 0,   z: 0 }
+  ];
+
+  // array of the indices for the 2 vertices in each edge
+  let rockEdges = [
+    [0,1],[1,3],[3,2],[2,0],
+    [0,4],[1,4],[2,4],[3,4],
+    [0,5],[1,5],[2,5],[3,5]
+  ];
+
+  // mountain model
+  let mountainVertices = [
+    { x: 1, y: 0, z: 1 },
+    { x:-1, y: 0, z: 1 },
+    { x: 1, y: 0, z:-1 },
+    { x:-1, y: 0, z:-1 },
+    { x: 0, y: 2, z: 0 }
+  ];
+
+  // array of the indices for the 2 vertices in each edge
+  let mountainEdges = [
+    [0,1],[1,3],[3,2],[2,0],
+    [0,4],[1,4],[2,4],[3,4]
+  ];
+
+  // all the objects instances in world space, scaled and translated from object space
+  let objects = [
+    { vertices: cubeVertices,     edges: cubeEdges,     x: 0,  y: 0, z: 0, scale: 1,   color: "white" },
+    { vertices: treeVertices,     edges: treeEdges,     x: 3,  y: 0, z: 0, scale: 1.5, color: "#2d6a3e" },
+    { vertices: rockVertices,     edges: rockEdges,     x: -2, y: 0, z: 1, scale: 1.2, color: "#888888" },
+    { vertices: mountainVertices, edges: mountainEdges, x: -4, y: 0, z: 8, scale: 3,   color: "#5a6a7a" }
+  ];
 
   // camera position in world space
   let camera = {x: 0, y: 0, z: -10};
@@ -127,6 +164,9 @@
     ctx.fillStyle = "#050510";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+    for(let o = 0; o < objects.length; o++){
+      let obj = objects[o];
+
     // here we will store u,v coordinates for the vertices,
     // projected onto our 2d plane
     let projectedVertices = [];
@@ -134,64 +174,12 @@
     //- loop through the original vertices (X, Y, Z)
     //- and determine their position in 3D space relative to camera (x, y, z)
     //- then project them onto the 2D plane
-    for(let v = 0; v< vertices.length; v++){   //  you could also write it foreach...
-       console.log("original position:");  //helpful to print things
-       console.log( vertices[v] );
-
-       console.log("camera-relative position");
-       // the vertex position is relative to the camera, so subtracting the camera position from the vertex position to get the relative position
-       let camVert = {};
-       camVert.x = vertices[v].x - camera.x;
-       camVert.y = vertices[v].y - camera.y;
-       camVert.z = vertices[v].z - camera.z;
-       console.log( camVert );
-
-       console.log("projected position");
-       // this is the perspective projection, u = x/z and v = y/z formulas
-       let canvasPos = {};
-       canvasPos.u = camVert.x / camVert.z;
-       canvasPos.v = camVert.y / camVert.z;
-       console.log( canvasPos );
-
-       console.log("scale and center");
-       canvasPos.u = canvasPos.u * canvas.width + canvas.width/2;
-       canvasPos.v = canvasPos.v * canvas.height + canvas.height/2;
-       console.log( canvasPos );
-
-       projectedVertices.push(canvasPos);
-       console.log("---------------");
-
-    }
-
-    //loop through the edges
-    //  find the newly computed projected vertices - 2 per edge
-    //  draw the line
-    for(let e = 0; e < edges.length; e++){
-
-      //first vertex
-      let e1 = edges[e][0]; //idx
-      let u1 = projectedVertices[ e1 ].u;
-      let v1 = canvas.height - projectedVertices[ e1 ].v;  //canvas y grows downwards, so we need to be flipping the v coordinate, similar to the PDF diagram that shows the y axis growing upwards
-
-      //second vertex
-      let e2 = edges[e][1]; //idx
-      let u2 = projectedVertices[ e2 ].u;
-      let v2 = canvas.height - projectedVertices[ e2 ].v;  //same explanation as above
-
-      drawLine(u1, v1, u2, v2, "white");
-    }
-
-
-    // scaling and translating the tree vertices into world space, then projecting the tree vertices onto the 2D plane with the same pinhole math as the cube
-    let projectedTree = [];
-
-    for(let v = 0; v < treeVertices.length; v++){
-      
-      // converting the tree vertices from object space to world space
-      let world = {};
-      world.x = treeVertices[v].x * tree.scale + tree.x;
-      world.y = treeVertices[v].y * tree.scale + tree.y;
-      world.z = treeVertices[v].z * tree.scale + tree.z;
+    for(let v = 0; v < obj.vertices.length; v++){
+        // converting from object space to world space 
+        let world = {};
+        world.x = obj.vertices[v].x * obj.scale + obj.x;
+        world.y = obj.vertices[v].y * obj.scale + obj.y;
+        world.z = obj.vertices[v].z * obj.scale + obj.z;
 
       // converting the world space coordinates to camera space coordinates
       let camVert = {};
@@ -206,18 +194,18 @@
       canvasPos.u = canvasPos.u * canvas.width + canvas.width/2;
       canvasPos.v = canvasPos.v * canvas.height + canvas.height/2;
 
-      projectedTree.push(canvasPos);
+      projectedVertices.push(canvasPos);
     }
 
-    // green for the tree edges
-    for(let e = 0; e < treeEdges.length; e++){
-      let e1 = treeEdges[e][0];
-      let e2 = treeEdges[e][1];
-      let u1 = projectedTree[e1].u;
-      let v1 = canvas.height - projectedTree[e1].v;
-      let u2 = projectedTree[e2].u;
-      let v2 = canvas.height - projectedTree[e2].v;
-      drawLine(u1, v1, u2, v2, "#2d6a3e");
+    // going through all the edges for this object
+    for(let e = 0; e < obj.edges.length; e++){
+      let e1 = obj.edges[e][0];
+      let e2 = obj.edges[e][1];
+      let u1 = projectedVertices[ e1 ].u;
+      let v1 = canvas.height - projectedVertices[ e1 ].v;
+      let u2 = projectedVertices[ e2 ].u;
+      let v2 = canvas.height - projectedVertices[ e2 ].v;
+      drawLine(u1, v1, u2, v2, obj.color);      }
     }
 
   }
