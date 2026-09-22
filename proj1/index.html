@@ -34,7 +34,7 @@
 
   <div id="info">
     <b>Forest Exploration: Shivam Sinay Kharangate</b><br>
-    Arrows are for moving the camera, and r is for resetting.
+    Arrows or WASD are for moving the camera, and r is for resetting.
   </div>
 
 <script>
@@ -176,21 +176,29 @@
       event.preventDefault();
        switch (event.key) {
         case "ArrowUp":
+        case "w":
+        case "W":
           camera.z -= 1; // moving the camera closer to the object
           console.log("Up arrow pressed");
           draw();
           break;
         case "ArrowDown":
+        case "s":
+        case "S":
           camera.z += 1; // moving the camera further away from the object
           console.log("Down arrow pressed");
           draw();
           break;
         case "ArrowLeft":
+        case "a":
+        case "A":
           camera.x -= 1; // moving the camera to the left
           console.log("Left arrow pressed");
           draw();
           break;
         case "ArrowRight":
+        case "d":
+        case "D":
           camera.x += 1; // moving the camera to the right
           console.log("Right arrow pressed");
           draw();
