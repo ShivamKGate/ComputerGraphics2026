@@ -42,11 +42,12 @@
 
   <div id="info">
     <b>Forest Explorer: Shivam Sinay Kharangate</b><br>
-    Arrows or WASD are for moving the camera, and r is for resetting.<br>
-    level 0 is cube &nbsp;|&nbsp; level 1 is forest, reach between mountains to win<br>
+    Arrows or WASD are for moving the camera, r is for resetting, and F is for paying respects near a tree or rock.<br>
+    level 0 is cube &nbsp;|&nbsp; level 1 is forest &nbsp;|&nbsp; 2 is low-res 320x200, reach between mountains to win<br>
     <button type="button" id="btnLevel0">Level 0</button>
     <button type="button" id="btnLevel1">Level 1</button>
-    &nbsp; current: <span id="levelLabel">1</span> // for current leevl display
+    <button type="button" id="btnLevel2">Level 2</button>
+    &nbsp; current: <span id="levelLabel">1</span>
   </div>
 
 <script>
@@ -58,12 +59,71 @@
   //  resolution of the pixel grid
   const rows = 200;
   const cols = 320;
-  const pixelGrid = Array.from({ length: cols }, () => Array(rows).fill("#050510"));
+  const pixelSize = 5;
+  let pixelGrid = Array.from({ length: cols }, () => Array(rows).fill("#050510"));
 
-  let seePixelOutline = true;
+  let seePixelOutline = false; // dont need to see the grids lines
 
   function setPixelColor(u,v,color){
+    u = Math.round(u);
+    v = Math.round(v);
+    if (u < 0 || v < 0 || u >= cols || v >= rows) return;
     pixelGrid[u][v] = color;
+  }
+
+  // filling the whole grid with bg color
+  function clearPixelGrid(bg) {
+    for (let u = 0; u < cols; u++) {
+      for (let v = 0; v < rows; v++) {
+        pixelGrid[u][v] = bg;
+      }
+    }
+  }
+
+  // incremental line drawing algo
+  function drawLineOnGrid(x0, y0, x1, y1, color) {
+    x0 = Math.round(x0);
+    y0 = Math.round(y0);
+    x1 = Math.round(x1);
+    y1 = Math.round(y1);
+
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+
+    // how many steps along the longer axis
+    let steps = Math.abs(dx);
+    if (Math.abs(dy) > steps) steps = Math.abs(dy);
+
+    if (steps === 0) {
+      setPixelColor(x0, y0, color);
+      return;
+    }
+
+    let xInc = dx / steps;
+    let yInc = dy / steps;
+    let x = x0;
+    let y = y0;
+
+    for (let i = 0; i <= steps; i++) {
+      setPixelColor(x, y, color);
+      x = x + xInc;
+      y = y + yInc;
+    }
+  }
+
+  // drawing every logical pixel as 5x5
+  function drawPixelGridToCanvas() {
+    for (let v = 0; v < rows; v++) {
+      for (let u = 0; u < cols; u++) {
+        ctx.fillStyle = pixelGrid[u][v];
+        ctx.fillRect(u * pixelSize, v * pixelSize, pixelSize, pixelSize);
+        if (seePixelOutline) {
+          ctx.strokeStyle = "#444444";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(u * pixelSize, v * pixelSize, pixelSize, pixelSize);
+        }
+      }
+    }
   }
 
 
@@ -235,6 +295,11 @@
   let won = false;
   let winSpot = { x: -1, y: 3.5, z: 27 }; // floating text haha
 
+  // range for paying respects lol
+  let respectRange = 2.2;
+  let respectMessage = "";
+  let respectCount = 0;
+
   // just the cube lol
   function setupCubeScene() {
     objects = [
@@ -244,6 +309,7 @@
     camera.y = 0;
     camera.z = -10;
     won = false;
+    respectMessage = "";
   }
 
   // the forest
@@ -253,6 +319,7 @@
     camera.y = 1.5;
     camera.z = 2;
     won = false;
+    respectMessage = "";
   }
 
   // level button selecter
@@ -261,6 +328,13 @@
     document.getElementById("levelLabel").textContent = String(n);
     if (n === 0) setupCubeScene();
     else setupForestScene();
+    if (n === 2) {
+      canvas.width = cols * pixelSize;
+      canvas.height = rows * pixelSize;
+    } else {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
     draw();
   }
 
@@ -285,9 +359,56 @@
     return false;
   }
 
+  // rock or tree can be paid respects to lol
+  function isTreeOrRock(obj) {
+    return obj.vertices === treeVertices || obj.vertices === rockVertices;
+  }
+
+  // finding nearby tree or rock for paying respects
+  function getNearbyRespectTarget() {
+    if (level !== 1 && level !== 2) return null;
+
+    let best = null;
+    let bestDist = respectRange;
+
+    for (let i = 0; i < objects.length; i++) {
+      let obj = objects[i];
+      if (!isTreeOrRock(obj)) continue;
+
+      let dx = camera.x - obj.x;
+      let dz = camera.z - obj.z;
+      let dist = Math.sqrt(dx * dx + dz * dz);
+
+      // being close enough 
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = obj;
+      }
+    }
+    return best;
+  }
+
+  // to pay respects in front of a tree or rock
+  function payRespects() {
+    if (level !== 1 && level !== 2) return;
+    let target = getNearbyRespectTarget();
+    if (!target) return;
+
+    // counting total respects paid
+    respectCount = respectCount + 1;
+    respectMessage = "Respects paid. (" + respectCount + ")";
+    draw();
+
+    // clear the message after a moment
+    setTimeout(function() {
+      respectMessage = "";
+      draw();
+    }, 1500);
+  }
+
   // checking if player reached the win zone
   function checkWin() {
-    if (level !== 1) return;
+    if (level !== 1 && level !== 2) return;
     // win zone kinda between the mountains
     if (camera.x > -4 && camera.x < 4 && camera.z > 25 && camera.z < 30) {
       won = true;
@@ -315,6 +436,18 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#050510";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (level === 2) {
+      clearPixelGrid("#050510");
+    }
+
+    // what size we project onto (hi-res canvas vs mock low-res)
+    let screenW = canvas.width;
+    let screenH = canvas.height;
+    if (level === 2) {
+      screenW = cols;
+      screenH = rows;
+    }
 
     for(let o = 0; o < objects.length; o++){
       let obj = objects[o];
@@ -349,8 +482,8 @@
       let canvasPos = {};
       canvasPos.u = camVert.x / camVert.z;
       canvasPos.v = camVert.y / camVert.z;
-      canvasPos.u = canvasPos.u * canvas.width + canvas.width/2;
-      canvasPos.v = canvasPos.v * canvas.height + canvas.height/2;
+      canvasPos.u = canvasPos.u * screenW + screenW / 2;
+      canvasPos.v = canvasPos.v * screenH + screenH / 2;
 
       projectedVertices.push(canvasPos);
     }
@@ -366,10 +499,20 @@
       }
 
       let u1 = projectedVertices[ e1 ].u;
-      let v1 = canvas.height - projectedVertices[ e1 ].v;
+      let v1 = screenH - projectedVertices[ e1 ].v;
       let u2 = projectedVertices[ e2 ].u;
-      let v2 = canvas.height - projectedVertices[ e2 ].v;
-      drawLine(u1, v1, u2, v2, obj.color);      }
+      let v2 = screenH - projectedVertices[ e2 ].v;
+
+      // drawing lines on canvas
+      if (level === 2) {
+        drawLineOnGrid(u1, v1, u2, v2, obj.color);
+      } else {
+        drawLine(u1, v1, u2, v2, obj.color);
+      }
+    }
+  }
+    if (level === 2) {
+      drawPixelGridToCanvas();
     }
 
     // if won then drawing a floating win message between the mountains
@@ -394,6 +537,22 @@
         ctx.textAlign = "center";
         ctx.fillText("Good job you won the game!!!", u, v);
       }
+    }
+
+    // show respects prompt when close 
+    if ((level === 1 || level === 2) && getNearbyRespectTarget() !== null) {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "18px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("Press F to pay respect.", canvas.width / 2, canvas.height - 40);
+    }
+
+    // short feedback after pressing F
+    if (respectMessage !== "") {
+      ctx.fillStyle = "#a8e6a3";
+      ctx.font = "20px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText(respectMessage, canvas.width / 2, canvas.height - 70);
     }
 
   }
@@ -456,11 +615,18 @@
           setLevel(level);
           console.log("Reset", camera);
           break;
+        case "f":
+        case "F":
+          payRespects();
+          break;
         case "0":
           setLevel(0);
           break;
         case "1":
           setLevel(1);
+          break;
+        case "2":
+          setLevel(2);
           break;
         default:
           return;
@@ -475,10 +641,18 @@
   document.getElementById("btnLevel1").addEventListener("click", function() {
     setLevel(1);
   });
+  document.getElementById("btnLevel2").addEventListener("click", function() {
+    setLevel(2);
+  });
 
   function resizeCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    if (level === 2) {
+      canvas.width = cols * pixelSize;
+      canvas.height = rows * pixelSize;
+    } else {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
     draw();
   }
 
