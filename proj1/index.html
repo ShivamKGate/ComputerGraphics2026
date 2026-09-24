@@ -43,10 +43,11 @@
   <div id="info">
     <b>Forest Explorer: Shivam Sinay Kharangate</b><br>
     Arrows or WASD are for moving the camera, r is for resetting, and F is for paying respects near a tree or rock.<br>
-    level 0 is cube &nbsp;|&nbsp; level 1 is forest &nbsp;|&nbsp; 2 is low-res 320x200, reach between mountains to win<br>
+    level 0 is cube &nbsp;|&nbsp; level 1 is forest &nbsp;|&nbsp; level 2 is low-res 320x200 &nbsp;|&nbsp; level 3 is triangles and depth, reach between mountains to win<br>
     <button type="button" id="btnLevel0">Level 0</button>
     <button type="button" id="btnLevel1">Level 1</button>
     <button type="button" id="btnLevel2">Level 2</button>
+    <button type="button" id="btnLevel3">Level 3</button>
     &nbsp; current: <span id="levelLabel">1</span>
   </div>
 
@@ -61,6 +62,7 @@
   const cols = 320;
   const pixelSize = 5;
   let pixelGrid = Array.from({ length: cols }, () => Array(rows).fill("#050510"));
+  let depthGrid = Array.from({ length: cols }, () => Array(rows).fill(Infinity));
 
   let seePixelOutline = false; // dont need to see the grids lines
 
@@ -76,6 +78,15 @@
     for (let u = 0; u < cols; u++) {
       for (let v = 0; v < rows; v++) {
         pixelGrid[u][v] = bg;
+      }
+    }
+  }
+
+  // resetting depth so every pixel starts theoretically infinitely far
+  function clearDepthGrid() {
+    for (let u = 0; u < cols; u++) {
+      for (let v = 0; v < rows; v++) {
+        depthGrid[u][v] = Infinity;
       }
     }
   }
@@ -108,6 +119,63 @@
       setPixelColor(x, y, color);
       x = x + xInc;
       y = y + yInc;
+    }
+  }
+
+  // barycentric
+  function edgeFn(ax, ay, bx, by, px, py) {
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+  }
+
+  // filling a triangle into pixel grid with coverage test and depth buffer
+  function fillTriangle(p0, p1, p2, color) {
+    if (p0 === null || p1 === null || p2 === null) return;
+
+    // bounding box of the triangle
+    let minX = Math.floor(Math.min(p0.x, p1.x, p2.x));
+    let maxX = Math.ceil(Math.max(p0.x, p1.x, p2.x));
+    let minY = Math.floor(Math.min(p0.y, p1.y, p2.y));
+    let maxY = Math.ceil(Math.max(p0.y, p1.y, p2.y));
+
+    if (minX < 0) minX = 0;
+    if (minY < 0) minY = 0;
+    if (maxX > cols - 1) maxX = cols - 1;
+    if (maxY > rows - 1) maxY = rows - 1;
+
+    let area = edgeFn(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y);
+    if (area === 0) return; // degenerate triangle
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        // testing the center of logical pixel
+        let px = x + 0.5;
+        let py = y + 0.5;
+
+        let w0 = edgeFn(p1.x, p1.y, p2.x, p2.y, px, py);
+        let w1 = edgeFn(p2.x, p2.y, p0.x, p0.y, px, py);
+        let w2 = edgeFn(p0.x, p0.y, p1.x, p1.y, px, py);
+
+        // inside if all weights match the sign of area
+        let inside = false;
+        if (area > 0) {
+          if (w0 >= 0 && w1 >= 0 && w2 >= 0) inside = true;
+        } else {
+          if (w0 <= 0 && w1 <= 0 && w2 <= 0) inside = true;
+        }
+        if (!inside) continue;
+
+        // barycentric weights
+        let b0 = w0 / area;
+        let b1 = w1 / area;
+        let b2 = w2 / area;
+
+        // interpolating depth and keeping the nearest triangle
+        let z = b0 * p0.z + b1 * p1.z + b2 * p2.z;
+        if (z < depthGrid[x][y]) {
+          depthGrid[x][y] = z;
+          pixelGrid[x][y] = color;
+        }
+      }
     }
   }
 
@@ -157,6 +225,16 @@
     [3, 7], //DH
   ];
 
+  // cube surfaces as triangles
+  let cubeTriangles = [
+    [0,2,3,"#c9a66b"],[0,3,1,"#c9a66b"],
+    [4,5,7,"#a67c52"],[4,7,6,"#a67c52"],
+    [0,1,5,"#d4b483"],[0,5,4,"#d4b483"],
+    [2,6,7,"#8b6914"],[2,7,3,"#8b6914"],
+    [0,4,6,"#b8956c"],[0,6,2,"#b8956c"],
+    [1,3,7,"#9c7a4a"],[1,7,5,"#9c7a4a"]
+  ];
+
 
   // tree model in object space, centered near the origin with trunk and canopy parts
   let treeVertices = [
@@ -184,6 +262,17 @@
     [8,12],[9,12],[10,12],[11,12]
   ];
 
+  // tree surfaces as triangles
+  let treeTriangles = [
+    [0,2,6,"#6b4423"],[0,6,4,"#6b4423"],
+    [1,5,7,"#5a3818"],[1,7,3,"#5a3818"],
+    [0,4,5,"#7a5230"],[0,5,1,"#7a5230"],
+    [2,3,7,"#4e2f14"],[2,7,6,"#4e2f14"],
+    [8,10,12,"#2d6a3e"],[10,11,12,"#245c34"],
+    [11,9,12,"#348a4c"],[9,8,12,"#2f7a44"],
+    [8,9,11,"#1f4d2c"],[8,11,10,"#1f4d2c"]
+  ];
+
   // rock model
   let rockVertices = [
     { x: 0.6, y: 0.1, z: 0.4 },
@@ -201,6 +290,14 @@
     [0,5],[1,5],[2,5],[3,5]
   ];
 
+  // rock surfaces as triangles
+  let rockTriangles = [
+    [0,1,4,"#8a8a8a"],[1,3,4,"#7a7a7a"],
+    [3,2,4,"#959595"],[2,0,4,"#6e6e6e"],
+    [0,5,1,"#5c5c5c"],[1,5,3,"#686868"],
+    [3,5,2,"#747474"],[2,5,0,"#606060"]
+  ];
+
   // mountain model
   let mountainVertices = [
     { x: 1, y: 0, z: 1 },
@@ -214,6 +311,13 @@
   let mountainEdges = [
     [0,1],[1,3],[3,2],[2,0],
     [0,4],[1,4],[2,4],[3,4]
+  ];
+
+  // mountain surfaces as triangles
+  let mountainTriangles = [
+    [0,1,4,"#5a6a7a"],[1,3,4,"#4a5a6a"],
+    [3,2,4,"#6a7a8a"],[2,0,4,"#556677"],
+    [0,2,3,"#3a4a3a"],[0,3,1,"#3a4a3a"]
   ];
 
   // cabin model
@@ -237,6 +341,28 @@
     [0,4],[1,5],[2,6],[3,7],
     [4,8],[5,8],[6,9],[7,9],[8,9]
   ];
+
+  // cabin surfaces as triangles
+  let cabinTriangles = [
+    [0,2,6,"#8b5a2b"],[0,6,4,"#8b5a2b"],
+    [1,5,7,"#7a4a22"],[1,7,3,"#7a4a22"],
+    [0,4,5,"#9a6530"],[0,5,1,"#9a6530"],
+    [2,3,7,"#6e421c"],[2,7,6,"#6e421c"],
+    [4,6,9,"#a33a2a"],[4,9,8,"#a33a2a"],
+    [5,8,9,"#8c2f22"],[5,9,7,"#8c2f22"],
+    [4,8,5,"#b84432"],[6,7,9,"#912f24"],
+    [0,1,3,"#5a3a1a"],[0,3,2,"#5a3a1a"]
+  ];
+
+  // finding which triangle list goes with object's model
+  function getTriangles(obj) {
+    if (obj.vertices === cubeVertices) return cubeTriangles;
+    if (obj.vertices === treeVertices) return treeTriangles;
+    if (obj.vertices === rockVertices) return rockTriangles;
+    if (obj.vertices === mountainVertices) return mountainTriangles;
+    if (obj.vertices === cabinVertices) return cabinTriangles;
+    return [];
+  }
 
   let level = 1;
 
@@ -328,7 +454,7 @@
     document.getElementById("levelLabel").textContent = String(n);
     if (n === 0) setupCubeScene();
     else setupForestScene();
-    if (n === 2) {
+    if (n === 2 || n === 3) {
       canvas.width = cols * pixelSize;
       canvas.height = rows * pixelSize;
     } else {
@@ -366,7 +492,7 @@
 
   // finding nearby tree or rock for paying respects
   function getNearbyRespectTarget() {
-    if (level !== 1 && level !== 2) return null;
+    if (level !== 1 && level !== 2 && level !== 3) return null;
 
     let best = null;
     let bestDist = respectRange;
@@ -390,7 +516,7 @@
 
   // to pay respects in front of a tree or rock
   function payRespects() {
-    if (level !== 1 && level !== 2) return;
+    if (level !== 1 && level !== 2 && level !== 3) return;
     let target = getNearbyRespectTarget();
     if (!target) return;
 
@@ -408,7 +534,7 @@
 
   // checking if player reached the win zone
   function checkWin() {
-    if (level !== 1 && level !== 2) return;
+    if (level !== 1 && level !== 2 && level !== 3) return;
     // win zone kinda between the mountains
     if (camera.x > -4 && camera.x < 4 && camera.z > 25 && camera.z < 30) {
       won = true;
@@ -440,11 +566,21 @@
     if (level === 2) {
       clearPixelGrid("#050510");
     }
+    if (level === 3) {
+      clearPixelGrid("#87b5e0"); // the sky
+      clearDepthGrid();
+      // painting a ground band in the lower half
+      for (let u = 0; u < cols; u++) {
+        for (let v = Math.floor(rows * 0.55); v < rows; v++) {
+          pixelGrid[u][v] = "#2f5a28";
+        }
+      }
+    }
 
     // what size we project onto (hi-res canvas vs mock low-res)
     let screenW = canvas.width;
     let screenH = canvas.height;
-    if (level === 2) {
+    if (level === 2 || level === 3) {
       screenW = cols;
       screenH = rows;
     }
@@ -484,8 +620,33 @@
       canvasPos.v = camVert.y / camVert.z;
       canvasPos.u = canvasPos.u * screenW + screenW / 2;
       canvasPos.v = canvasPos.v * screenH + screenH / 2;
+      canvasPos.z = camVert.z; // depth for occlusion
 
       projectedVertices.push(canvasPos);
+    }
+
+    // now filling triangles instead of drawing edges
+    if (level === 3) {
+      let tris = getTriangles(obj);
+      for (let t = 0; t < tris.length; t++) {
+        let i0 = tris[t][0];
+        let i1 = tris[t][1];
+        let i2 = tris[t][2];
+        let col = tris[t][3];
+
+        let a = projectedVertices[i0];
+        let b = projectedVertices[i1];
+        let c = projectedVertices[i2];
+        if (a === null || b === null || c === null) continue;
+
+        // flipping v because canvas y grows downward
+        let p0 = { x: a.u, y: screenH - a.v, z: a.z };
+        let p1 = { x: b.u, y: screenH - b.v, z: b.z };
+        let p2 = { x: c.u, y: screenH - c.v, z: c.z };
+
+        fillTriangle(p0, p1, p2, col);
+      }
+      continue; // skipping edge drawing for this object
     }
 
     // going through all the edges for this object
@@ -511,7 +672,7 @@
       }
     }
   }
-    if (level === 2) {
+    if (level === 2 || level === 3) {
       drawPixelGridToCanvas();
     }
 
@@ -540,7 +701,7 @@
     }
 
     // show respects prompt when close 
-    if ((level === 1 || level === 2) && getNearbyRespectTarget() !== null) {
+    if ((level === 1 || level === 2 || level === 3) && getNearbyRespectTarget() !== null) {
       ctx.fillStyle = "#ffffff";
       ctx.font = "18px Arial";
       ctx.textAlign = "center";
@@ -628,6 +789,9 @@
         case "2":
           setLevel(2);
           break;
+        case "3":
+          setLevel(3);
+          break;
         default:
           return;
 
@@ -644,9 +808,12 @@
   document.getElementById("btnLevel2").addEventListener("click", function() {
     setLevel(2);
   });
+  document.getElementById("btnLevel3").addEventListener("click", function() {
+    setLevel(3);
+  });
 
   function resizeCanvas() {
-    if (level === 2) {
+    if (level === 2 || level === 3) {
       canvas.width = cols * pixelSize;
       canvas.height = rows * pixelSize;
     } else {
@@ -659,10 +826,10 @@
 
   window.addEventListener("resize", resizeCanvas);
 
-  // sizing the canvas first then starting on level 1
+  // sizing the canvas first then starting on level 0
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
-  setLevel(1);
+  setLevel(0);
 
   // continuous redrawing so the floating win message bobbing up and down
   function animate() {
