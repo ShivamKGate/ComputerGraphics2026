@@ -204,6 +204,97 @@ let level = '0';
 let gridSize = 12;
 let cubes = [];
 
+// grid options for level 1 and 2
+const GRID_OPTIONS_L1 = [
+  { value: '8', label: '8x8' },
+  { value: '12', label: '12x12' },
+  { value: '16', label: '16x16' },
+  { value: '20', label: '20x20' },
+];
+const GRID_OPTIONS_L2 = [
+  { value: '16', label: '16x16 (low)' },
+  { value: '24', label: '24x24' },
+  { value: '32', label: '32x32' },
+  { value: '40', label: '40x40 (target)' },
+];
+
+// image sampling state for level 2
+// colorMap and heightMap are the images that are used to sample the landscape
+let colorMap = null;
+let heightMap = null;
+let mapsReady = false;
+
+const HEIGHT_MIN = 0.25;
+const HEIGHT_MAX = 5.0;
+
+function loadImageData(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const off = document.createElement('canvas');
+      off.width = img.width;
+      off.height = img.height;
+      const ctx = off.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0, 0, img.width, img.height);
+      resolve({ width: img.width, height: img.height, data: imageData.data });
+    };
+    img.onerror = () => reject(new Error('Failed to load ' + url));
+    img.src = url;
+  });
+}
+
+async function loadMaps() {
+  try {
+    const [color, height] = await Promise.all([
+      loadImageData('images/alien-color.png'),
+      loadImageData('images/alien-height.png'),
+    ]);
+    colorMap = color;
+    heightMap = height;
+    mapsReady = true;
+    // if the user has already opened level 2 while maps were loading, rebuilding the landscape now
+    if (level === '2') setLevel('2');
+  } catch (err) {
+    console.error(err);
+    document.getElementById('status').textContent =
+      'Level 2 maps failed to load (serve folder over http, not file://)';
+  }
+}
+loadMaps();
+
+// sampling one pixel from an RGBA buffer
+// grid is N×N, image is W×H: mapping each cube to a pixel by stretching UV across the image
+function samplePixel(map, col, row, n) {
+  const u = n <= 1 ? 0 : col / (n - 1);
+  const v = n <= 1 ? 0 : row / (n - 1);
+  const px = Math.min(map.width - 1, Math.max(0, Math.floor(u * (map.width - 1))));
+  const py = Math.min(map.height - 1, Math.max(0, Math.floor(v * (map.height - 1))));
+  const i = (py * map.width + px) * 4;
+  return {
+    r: map.data[i],
+    g: map.data[i + 1],
+    b: map.data[i + 2],
+  };
+}
+
+// gray 0–255, world height: black is short and white is tall
+function grayToHeight(gray) {
+  return HEIGHT_MIN + (gray / 255) * (HEIGHT_MAX - HEIGHT_MIN);
+}
+
+function setGridOptions(options, selected) {
+  const sel = document.getElementById('gridSelect');
+  sel.innerHTML = '';
+  for (const opt of options) {
+    const el = document.createElement('option');
+    el.value = opt.value;
+    el.textContent = opt.label;
+    if (String(selected) === opt.value) el.selected = true;
+    sel.appendChild(el);
+  }
+}
+
 // deterministic ish height from the grid position, mainly for the alien ridges, not pure noise
 function proceduralHeight(col, row, n) {
   const u = col / Math.max(n - 1, 1);
@@ -228,6 +319,30 @@ function buildLandscape(withHeights) {
         z: (row - (gridSize - 1) / 2) * spacing,
         height: withHeights ? proceduralHeight(col, row, gridSize) : 1.0,
         tint: alienTint(col, row, gridSize),
+        color: null,
+      });
+    }
+  }
+}
+
+// level 2: building the landscape from image samples, combining the color and the height maps
+function buildLandscapeFromImages() {
+  cubes = [];
+  if (!mapsReady) return;
+
+  const spacing = 1.05;
+  for (let row = 0; row < gridSize; row++) {
+    for (let col = 0; col < gridSize; col++) {
+      const rgb = samplePixel(colorMap, col, row, gridSize);
+      const grayPix = samplePixel(heightMap, col, row, gridSize);
+      // height map is grayscale: using the red channel
+      const gray = grayPix.r;
+      cubes.push({
+        x: (col - (gridSize - 1) / 2) * spacing,
+        z: (row - (gridSize - 1) / 2) * spacing,
+        height: grayToHeight(gray),
+        tint: 0.5,
+        color: [rgb.r / 255, rgb.g / 255, rgb.b / 255],
       });
     }
   }
@@ -238,32 +353,54 @@ function setLevel(next) {
   document.getElementById('btnLevel0').classList.toggle('active', level === '0');
   document.getElementById('btnLevel1a').classList.toggle('active', level === '1a');
   document.getElementById('btnLevel1bc').classList.toggle('active', level === '1bc');
+  document.getElementById('btnLevel2').classList.toggle('active', level === '2');
 
   const gridSelect = document.getElementById('gridSelect');
   gridSelect.disabled = level === '0';
 
+  if (level === '2') {
+    if (![16, 24, 32, 40].includes(gridSize)) gridSize = 16;
+    setGridOptions(GRID_OPTIONS_L2, gridSize);
+  } else if (level === '1a' || level === '1bc') {
+    if (![8, 12, 16, 20].includes(gridSize)) gridSize = 12;
+    setGridOptions(GRID_OPTIONS_L1, gridSize);
+  }
+
   if (level === '0') {
     rebuildFlatCubeBuffer([0.55, 0.35, 0.85]);
-    cubes = [{ x: 0, z: 0, height: 2, tint: 0.5 }]; // scale 2×2×2 from unit cube
+    cubes = [{ x: 0, z: 0, height: 2, tint: 0.5, color: null }];
     document.getElementById('status').textContent = 'Level 0: single 2x2x2 cube';
   } else if (level === '1a') {
     rebuildFlatCubeBuffer([0.42, 0.28, 0.72]);
     buildLandscape(false);
     document.getElementById('status').textContent =
       `Level 1a: ${gridSize}x${gridSize} grid (translation only)`;
-  } else {
+  } else if (level === '1bc') {
     // level 1b/c uses per-vertex colors; tint varies slightly per cube so we
     // rebuild the shared mesh once with a mid tint. Height still comes from scale.
     rebuildCubeBuffer(0.45);
     buildLandscape(true);
     document.getElementById('status').textContent =
       `Level 1b/c: ${gridSize}x${gridSize} heights + vertex colors + orbiting camera`;
+  } else {
+    // level 2: image-sampled landscape
+    rebuildCubeBuffer(0.4);
+    if (!mapsReady) {
+      cubes = [];
+      document.getElementById('status').textContent =
+        'Level 2: loading color + height maps…';
+    } else {
+      buildLandscapeFromImages();
+      document.getElementById('status').textContent =
+        `Level 2: ${gridSize}x${gridSize} from ${colorMap.width}x${colorMap.height} maps + orbiting camera`;
+    }
   }
 }
 
 document.getElementById('btnLevel0').addEventListener('click', () => setLevel('0'));
 document.getElementById('btnLevel1a').addEventListener('click', () => setLevel('1a'));
 document.getElementById('btnLevel1bc').addEventListener('click', () => setLevel('1bc'));
+document.getElementById('btnLevel2').addEventListener('click', () => setLevel('2'));
 document.getElementById('gridSelect').addEventListener('change', (e) => {
   gridSize = parseInt(e.target.value, 10);
   if (level !== '0') setLevel(level);
@@ -305,9 +442,9 @@ function render(timeMs) {
     height = 3.5;
     lookY = 1;
   } else {
-    radius = Math.max(14, gridSize * 1.1);
-    height = Math.max(8, gridSize * 0.55);
-    lookY = 0;
+    radius = Math.max(14, gridSize * 1.15);
+    height = Math.max(8, gridSize * 0.6);
+    lookY = level === '2' ? 1.2 : 0;
   }
 
   const angle = seconds * ORBIT_SPEED;
@@ -330,13 +467,17 @@ function render(timeMs) {
     for (const cube of cubes) {
       drawCube(cube, 1, 1, 1, [1, 1, 1]);
     }
-  } else {
+  } else if (level === '1bc') {
     // 1b: scaling in y. 1c: vertex colors in the buffer + per-cube tint.
     for (const cube of cubes) {
       const t = cube.tint;
       // procedural tint: purple to blue to magenta across the grid
       const tintRgb = [0.75 + t * 0.4, 0.55 + t * 0.2, 1.1 - t * 0.25];
       drawCube(cube, 1, cube.height, 1, tintRgb);
+    }
+  } else if (level === '2') {
+    for (const cube of cubes) {
+      drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1]);
     }
   }
 
