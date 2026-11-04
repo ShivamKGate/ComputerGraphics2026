@@ -157,6 +157,37 @@ function translation(x, y, z) {
 function scaling(sx, sy, sz) {
   return [sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, sz, 0, 0, 0, 0, 1];
 }
+// rotating around y axis for UFOs for aiming them along their flight direction
+function rotationY(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [
+    c, 0, -s, 0,
+    0, 1, 0, 0,
+    s, 0, c, 0,
+    0, 0, 0, 1,
+  ];
+}
+function rotationX(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [
+    1, 0, 0, 0,
+    0, c, s, 0,
+    0, -s, c, 0,
+    0, 0, 0, 1,
+  ];
+}
+function rotationZ(angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [
+    c, s, 0, 0,
+    -s, c, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+}
 function multiply(a, b) {
   const out = new Array(16).fill(0);
   for (let col = 0; col < 4; col++) {
@@ -167,6 +198,36 @@ function multiply(a, b) {
     }
   }
   return out;
+}
+
+// level 3: cubic Bezier curve (degree 3)
+// p0/p3 = endpoints, p1/p2 = control points that pull the curve
+function cubicBezier(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  const uu = u * u;
+  const tt = t * t;
+  const a = uu * u;        // (1-t)^3
+  const b = 3 * uu * t;    // 3(1-t)^2 t
+  const c = 3 * u * tt;    // 3(1-t) t^2
+  const d = tt * t;        // t^3
+  return [
+    a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+    a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1],
+    a * p0[2] + b * p1[2] + c * p2[2] + d * p3[2],
+  ];
+}
+
+// derivative b'(t) that I used as a facing direction for the UFO
+function cubicBezierTangent(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  const c0 = 3 * u * u;
+  const c1 = 6 * u * t;
+  const c2 = 3 * t * t;
+  return [
+    c0 * (p1[0] - p0[0]) + c1 * (p2[0] - p1[0]) + c2 * (p3[0] - p2[0]),
+    c0 * (p1[1] - p0[1]) + c1 * (p2[1] - p1[1]) + c2 * (p3[1] - p2[1]),
+    c0 * (p1[2] - p0[2]) + c1 * (p2[2] - p1[2]) + c2 * (p3[2] - p2[2]),
+  ];
 }
 function perspective(fov, aspect, near, far) {
   const f = 1 / Math.tan(fov / 2);
@@ -203,6 +264,11 @@ function lookAt(eye, target, up) {
 let level = '0';
 let gridSize = 12;
 let cubes = [];
+
+// level 3 skyscape state
+let skyIslands = []; // stationary cube clusters in the sky
+let ufos = [];       // crafting that follow cubic Bezier paths
+let volcanoCubes = []; // rotating cubes erupting from the center
 
 // grid options for level 1 and 2
 const GRID_OPTIONS_L1 = [
@@ -253,8 +319,8 @@ async function loadMaps() {
     colorMap = color;
     heightMap = height;
     mapsReady = true;
-    // if the user has already opened level 2 while maps were loading, rebuilding the landscape now
-    if (level === '2') setLevel('2');
+    // if the user has already opened level 2/3 while maps were loading, rebuilding the landscape now
+    if (level === '2' || level === '3') setLevel(level);
   } catch (err) {
     console.error(err);
     document.getElementById('status').textContent =
@@ -348,17 +414,88 @@ function buildLandscapeFromImages() {
   }
 }
 
+// level 3: a few floating sky islands UFOs looking thingies
+function buildSkyIslands() {
+  skyIslands = [
+    // island A
+    { x: -6, y: 5.5, z: -4, sx: 2.2, sy: 0.6, sz: 1.8, color: [0.45, 0.25, 0.75] },
+    { x: -6, y: 6.1, z: -4, sx: 1.2, sy: 0.8, sz: 1.0, color: [0.7, 0.35, 0.95] },
+    { x: -5.2, y: 5.8, z: -3.4, sx: 0.7, sy: 1.2, sz: 0.7, color: [0.55, 0.9, 0.95] },
+    // island B
+    { x: 7, y: 6.2, z: 3, sx: 2.5, sy: 0.5, sz: 2.0, color: [0.35, 0.2, 0.65] },
+    { x: 7.4, y: 6.7, z: 3.2, sx: 1.0, sy: 0.7, sz: 1.0, color: [0.85, 0.4, 0.9] },
+    { x: 6.4, y: 6.6, z: 2.4, sx: 0.6, sy: 1.0, sz: 0.6, color: [0.4, 0.85, 0.8] },
+    // cloud ish floaters
+    { x: 0, y: 7.0, z: -8, sx: 3.0, sy: 0.45, sz: 1.4, color: [0.55, 0.45, 0.8] },
+    { x: 1.2, y: 7.3, z: -8, sx: 1.6, sy: 0.4, sz: 1.0, color: [0.65, 0.55, 0.9] },
+    { x: -9, y: 5.8, z: 6, sx: 2.0, sy: 0.4, sz: 1.2, color: [0.5, 0.4, 0.75] },
+  ];
+}
+
+// UFOs made of a few cubes, each with its own cubic Bezier control polygon!
+function buildUfos() {
+  ufos = [
+    {
+      // wide arc across the sky (lower y axis)
+      p0: [-12, 4.2, -5],
+      p1: [-3, 6.5, 3],
+      p2: [5, 5.0, -1],
+      p3: [12, 4.8, 6],
+      t: 0,
+      speed: 0.08,
+      color: [0.75, 0.85, 0.95],
+      accent: [0.3, 1.0, 0.7],
+    },
+    {
+      // looping path that dips then rises a little
+      p0: [11, 3.8, -8],
+      p1: [2, 6.8, -3],
+      p2: [-6, 4.0, 2],
+      p3: [-12, 5.5, 7],
+      t: 0.35,
+      speed: 0.06,
+      color: [0.95, 0.7, 0.4],
+      accent: [1.0, 0.4, 0.85],
+    },
+  ];
+}
+
+// a mini volcano haha, rotating cubes erupting from below the center and rising upward
+function buildVolcano() {
+  volcanoCubes = [];
+  const count = 14;
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    volcanoCubes.push({
+      // start near the crater and rise
+      phase: i / count,
+      riseSpeed: 2.2 + (i % 5) * 0.35,
+      spinSpeed: 2.4 + (i % 4) * 0.8,
+      outward: 0.9 + (i % 3) * 0.45,
+      baseAngle: angle,
+      size: 0.35 + (i % 3) * 0.12,
+      color: i % 2 === 0 ? [1.0, 0.45, 0.2] : [0.95, 0.25, 0.75],
+    });
+  }
+}
+
 function setLevel(next) {
   level = next;
   document.getElementById('btnLevel0').classList.toggle('active', level === '0');
   document.getElementById('btnLevel1a').classList.toggle('active', level === '1a');
   document.getElementById('btnLevel1bc').classList.toggle('active', level === '1bc');
   document.getElementById('btnLevel2').classList.toggle('active', level === '2');
+  document.getElementById('btnLevel3').classList.toggle('active', level === '3');
 
   const gridSelect = document.getElementById('gridSelect');
   gridSelect.disabled = level === '0';
 
-  if (level === '2') {
+  // restting my arrays for each of the levels
+  skyIslands = [];
+  ufos = [];
+  volcanoCubes = [];
+
+  if (level === '2' || level === '3') {
     if (![16, 24, 32, 40].includes(gridSize)) gridSize = 16;
     setGridOptions(GRID_OPTIONS_L2, gridSize);
   } else if (level === '1a' || level === '1bc') {
@@ -382,8 +519,7 @@ function setLevel(next) {
     buildLandscape(true);
     document.getElementById('status').textContent =
       `Level 1b/c: ${gridSize}x${gridSize} heights + vertex colors + orbiting camera`;
-  } else {
-    // level 2: image-sampled landscape
+  } else if (level === '2') {
     rebuildCubeBuffer(0.4);
     if (!mapsReady) {
       cubes = [];
@@ -394,6 +530,20 @@ function setLevel(next) {
       document.getElementById('status').textContent =
         `Level 2: ${gridSize}x${gridSize} from ${colorMap.width}x${colorMap.height} maps + orbiting camera`;
     }
+  } else if (level === '3') {
+    rebuildCubeBuffer(0.4);
+    buildSkyIslands();
+    buildUfos();
+    buildVolcano();
+    if (!mapsReady) {
+      cubes = [];
+      document.getElementById('status').textContent =
+        'Level 3: loading maps for ground…';
+    } else {
+      buildLandscapeFromImages();
+      document.getElementById('status').textContent =
+        `Level 3: Bezier UFOs + volcano cubes, ${gridSize}x${gridSize} landscape`;
+    }
   }
 }
 
@@ -401,6 +551,7 @@ document.getElementById('btnLevel0').addEventListener('click', () => setLevel('0
 document.getElementById('btnLevel1a').addEventListener('click', () => setLevel('1a'));
 document.getElementById('btnLevel1bc').addEventListener('click', () => setLevel('1bc'));
 document.getElementById('btnLevel2').addEventListener('click', () => setLevel('2'));
+document.getElementById('btnLevel3').addEventListener('click', () => setLevel('3'));
 document.getElementById('gridSelect').addEventListener('change', (e) => {
   gridSize = parseInt(e.target.value, 10);
   if (level !== '0') setLevel(level);
@@ -413,6 +564,7 @@ gl.enable(gl.DEPTH_TEST);
 gl.clearColor(0.05, 0.03, 0.1, 1.0); // deep alien night sky
 
 const ORBIT_SPEED = 0.35; // radians / second
+let lastSeconds = 0;
 
 function drawCube(cube, sx, sy, sz, tintRgb) {
   // scaling first, then translation
@@ -422,8 +574,95 @@ function drawCube(cube, sx, sy, sz, tintRgb) {
   gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
 }
 
+// drawing a cube with translating, rotating, and scaling
+function drawCubeTRS(x, y, z, yaw, sx, sy, sz, localOx, localOy, localOz, tintRgb) {
+  let model = scaling(sx, sy, sz);
+  model = multiply(translation(localOx, localOy, localOz), model);
+  model = multiply(rotationY(yaw), model);
+  model = multiply(translation(x, y, z), model);
+  gl.uniformMatrix4fv(uModel, false, model);
+  gl.uniform3fv(uTint, tintRgb);
+  gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
+}
+
+// centered tumbling cube (for volcano ejecta), rotating around cube center
+function drawTumblingCube(x, y, z, rx, ry, rz, size, tintRgb) {
+  // unit cube is y=0..1, shifting by -0.5 in y so rotations orbit the center
+  let model = translation(0, -0.5, 0);
+  model = multiply(scaling(size, size, size), model);
+  model = multiply(rotationX(rx), model);
+  model = multiply(rotationY(ry), model);
+  model = multiply(rotationZ(rz), model);
+  model = multiply(translation(x, y, z), model);
+  gl.uniformMatrix4fv(uModel, false, model);
+  gl.uniform3fv(uTint, tintRgb);
+  gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
+}
+
+function drawSkyIslands() {
+  for (const p of skyIslands) {
+    // centering the unit cube vertically around p.y by shifting local y by -0.5*sy after scaling
+    // our unit cube goes y=0..1, so placing bottom at p.y - sy/2
+    drawCubeTRS(p.x, p.y - p.sy * 0.5, p.z, 0, p.sx, p.sy, p.sz, 0, 0, 0, p.color);
+  }
+}
+
+function drawUfo(ufo, pos, yaw) {
+  // a saucer body essentially a flat disc, cabin dome, and two accent lights
+  drawCubeTRS(pos[0], pos[1], pos[2], yaw, 1.8, 0.28, 1.8, 0, 0, 0, ufo.color);
+  drawCubeTRS(pos[0], pos[1], pos[2], yaw, 0.7, 0.45, 0.7, 0, 0.28, 0, [0.9, 0.95, 1.0]);
+  drawCubeTRS(pos[0], pos[1], pos[2], yaw, 0.25, 0.2, 0.25, 0.7, -0.05, 0, ufo.accent);
+  drawCubeTRS(pos[0], pos[1], pos[2], yaw, 0.25, 0.2, 0.25, -0.7, -0.05, 0, ufo.accent);
+}
+
+function updateAndDrawUfos(dt) {
+  for (const ufo of ufos) {
+    ufo.t += ufo.speed * dt;
+
+    // end of the path, or drifted far away, it will disappear and restart at P0
+    const posProbe = cubicBezier(ufo.p0, ufo.p1, ufo.p2, ufo.p3, Math.min(ufo.t, 1));
+    const dist = Math.hypot(posProbe[0], posProbe[1], posProbe[2]);
+    if (ufo.t >= 1 || dist > 22) {
+      ufo.t = 0;
+    }
+
+    const t = ufo.t;
+    const pos = cubicBezier(ufo.p0, ufo.p1, ufo.p2, ufo.p3, t);
+    const tan = cubicBezierTangent(ufo.p0, ufo.p1, ufo.p2, ufo.p3, t);
+    const yaw = Math.atan2(tan[0], tan[2]); // facing along the horizontal tangent
+    drawUfo(ufo, pos, yaw);
+  }
+}
+
+// a mini air volcano: cubes start below the crater, rise, drift out, tumble a little bit and then reset
+function updateAndDrawVolcano(seconds) {
+  const craterY = 0.4;   // emerging from just under the crater center
+  const maxHeight = 6.5;
+
+  for (const rock of volcanoCubes) {
+    // looping through the lifetime 0..1
+    let life = (seconds * rock.riseSpeed * 0.18 + rock.phase) % 1;
+    // easing out of the ground: starting below and then shooting up
+    const y = craterY - 2.0 + life * (maxHeight + 2.0);
+    const spread = life * life * rock.outward * 5.5;
+    const x = Math.cos(rock.baseAngle + life * 0.8) * spread;
+    const z = Math.sin(rock.baseAngle + life * 0.8) * spread;
+
+    const spin = seconds * rock.spinSpeed;
+    const rx = spin * 1.3;
+    const ry = spin * 0.9 + rock.baseAngle;
+    const rz = spin * 1.1;
+
+    // fading ish by shrinking a little bit near the top of the arc
+    const size = rock.size * (1 - life * 0.35);
+    drawTumblingCube(x, y, z, rx, ry, rz, size, rock.color);
+  }
+}
+
 function render(timeMs) {
   const seconds = timeMs * 0.001;
+  const dt = Math.min(0.05, Math.max(0, seconds - lastSeconds));
+  lastSeconds = seconds;
 
   canvas.width = canvas.clientWidth;
   canvas.height = canvas.clientHeight;
@@ -444,7 +683,12 @@ function render(timeMs) {
   } else {
     radius = Math.max(14, gridSize * 1.15);
     height = Math.max(8, gridSize * 0.6);
-    lookY = level === '2' ? 1.2 : 0;
+    if (level === '3') {
+      height = Math.max(height, 10);
+      lookY = 2.2;
+    } else {
+      lookY = level === '2' ? 1.2 : 0;
+    }
   }
 
   const angle = seconds * ORBIT_SPEED;
@@ -479,6 +723,13 @@ function render(timeMs) {
     for (const cube of cubes) {
       drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1]);
     }
+  } else if (level === '3') {
+    for (const cube of cubes) {
+      drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1]);
+    }
+    drawSkyIslands();
+    updateAndDrawUfos(dt);
+    updateAndDrawVolcano(seconds);
   }
 
   requestAnimationFrame(render);
