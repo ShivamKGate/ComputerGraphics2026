@@ -21,29 +21,158 @@ const vertexShaderSource = `
 
   varying vec3 vColor;
   varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  varying float vViewDepth;
 
   void main() {
     vColor = aColor;
+    vec4 world = uModel * vec4(aPosition, 1.0);
+    vWorldPos = world.xyz;
     vNormal = normalize(mat3(uModel) * aNormal);
-    gl_Position = uProjection * uView * uModel * vec4(aPosition, 1.0);
+    vec4 viewPos = uView * world;
+    vViewDepth = -viewPos.z;
+    gl_Position = uProjection * viewPos;
   }
 `;
 
-// fragment shader
+// fragment shader — directional + up to 4 dynamic point lights + fog + emissive
 const fragmentShaderSource = `
-  precision mediump float;
+  precision highp float;
 
-  uniform vec3 uTint;   // per-cube alien color shift (Level 1b/c)
+  uniform vec3 uTint;
+  uniform float uEmissive;     // 0 = lit surface, 1 = glowing crystal
+  uniform vec3 uAmbient;
+  uniform vec3 uDirLightDir;
+  uniform vec3 uDirLightColor;
+  uniform vec3 uFogColor;
+  uniform float uFogDensity;
+
+  // Dynamic crystal / lava point lights (Level 4)
+  uniform vec3 uL0Pos; uniform vec3 uL0Color; uniform float uL0Range;
+  uniform vec3 uL1Pos; uniform vec3 uL1Color; uniform float uL1Range;
+  uniform vec3 uL2Pos; uniform vec3 uL2Color; uniform float uL2Range;
+  uniform vec3 uL3Pos; uniform vec3 uL3Color; uniform float uL3Range;
+  uniform float uUsePointLights; // 1 on Level 4, else 0
+
+  // Level 4 additions. The sky is still a cube; its inside is procedurally colored.
+  uniform float uTime;
+  uniform float uSkyMode;
+  uniform vec3 uCameraPos;
 
   varying vec3 vColor;
   varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  varying float vViewDepth;
+
+  // Simple value noise and fractal noise for clouds in the alien nebula.
+  float hash3(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+  }
+  float noise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = mix(hash3(i), hash3(i + vec3(1,0,0)), f.x);
+    float b = mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x);
+    float c = mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x);
+    float d = mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x);
+    return mix(mix(a,b,f.y),mix(c,d,f.y),f.z);
+  }
+  vec3 alienSky(vec3 ray) {
+    float h = clamp(ray.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 horizon = vec3(0.35, 0.075, 0.35);
+    vec3 zenith = vec3(0.018, 0.012, 0.10);
+    vec3 sky = mix(horizon, zenith, smoothstep(0.13, 0.95, h));
+
+    // Two drifting, multi-scale nebula bands (not a flat skybox color).
+    vec3 q = ray * 5.5;
+    float cloud = noise3(q + vec3(uTime * 0.008, 0.0, 0.0)) * 0.55;
+    cloud += noise3(q * 2.8 - vec3(0.0, uTime * 0.014, 0.0)) * 0.30;
+    cloud += noise3(q * 6.0) * 0.15;
+    float band = pow(max(0.0, 1.0 - abs(ray.y - 0.20 - 0.25 * sin(ray.x * 3.5 + ray.z * 2.0))), 3.0);
+    float nebula = smoothstep(0.39, 0.78, cloud) * band;
+    sky += vec3(0.44, 0.065, 0.50) * nebula;
+    sky += vec3(0.02, 0.28, 0.35) * nebula * (0.5 + 0.5 * sin(ray.x * 12.0));
+
+    // Curtains of aurora light that slowly undulate near the horizon.
+    float wave = sin(ray.x * 14.0 + ray.z * 6.0 + uTime * 0.20) * 0.07;
+    float aurora = exp(-pow((ray.y - 0.23 - wave) * 8.0, 2.0));
+    aurora *= 0.45 + 0.55 * noise3(ray * 8.0 + vec3(0.0, uTime * 0.025, 0.0));
+    sky += mix(vec3(0.08,0.70,0.65), vec3(0.45,0.13,0.72), 0.5+0.5*sin(ray.x*9.0)) * aurora * 0.30;
+
+    // Tiny, sparse stars from angular 3D cells, with independent twinkle.
+    vec3 cells = floor(ray * 280.0);
+    float star = hash3(cells);
+    float sparkle = smoothstep(0.994, 0.9998, star);
+    sparkle *= 0.70 + 0.30 * sin(uTime * (0.8 + hash3(cells + 7.0) * 3.0) + star * 60.0);
+    sky += mix(vec3(0.40,0.82,1.0), vec3(1.0,0.68,0.95), hash3(cells + 12.0)) * sparkle * 1.2;
+
+    // Two distant planets, with soft atmospheric edge and a rim halo.
+    vec3 moonDir = normalize(vec3(-0.66, 0.42, -0.70));
+    float m = dot(ray, moonDir);
+    float disc = smoothstep(0.996, 0.997, m);
+    float rim = smoothstep(0.989, 0.996, m) * (1.0 - disc);
+    sky = mix(sky, vec3(0.40,0.66,0.98) * (0.65 + 0.35 * noise3(ray * 45.0)), disc);
+    sky += vec3(0.30,0.50,0.95) * rim * 0.22;
+    vec3 smallMoon = normalize(vec3(0.76, 0.32, 0.57));
+    float m2 = dot(ray, smallMoon);
+    sky = mix(sky, vec3(0.92,0.35,0.70), smoothstep(0.9991, 0.99945, m2));
+    return sky;
+  }
+
+  vec3 pointLight(vec3 pos, vec3 col, float range, vec3 N, vec3 worldPos) {
+    vec3 toL = pos - worldPos;
+    float dist = length(toL);
+    float atten = 1.0 - clamp(dist / range, 0.0, 1.0);
+    atten *= atten; // soft falloff
+    vec3 L = normalize(toL);
+    float ndotl = max(dot(N, L), 0.0);
+    // wrap a little so nearby cubes get a glow on more faces (bioluminescent bleed)
+    float wrap = ndotl * 0.75 + 0.25;
+    return col * wrap * atten;
+  }
 
   void main() {
-    // vColor is already interpolated across the triangle by the GPU.
-    vec3 lightDir = normalize(vec3(0.4, 1.0, 0.25));
-    float brightness = max(dot(normalize(vNormal), lightDir), 0.0);
-    float light = 0.35 + 0.65 * brightness;
-    gl_FragColor = vec4(vColor * uTint * light, 1.0);
+    if (uSkyMode > 0.5) {
+      gl_FragColor = vec4(alienSky(normalize(vWorldPos - uCameraPos)), 1.0);
+      return;
+    }
+    vec3 N = normalize(vNormal);
+    vec3 base = vColor * uTint;
+
+    // Emissive cubes (crystals) skip most shading and bloom through fog a bit.
+    if (uEmissive > 0.5) {
+      vec3 glow = base * 1.35;
+      float fogFactor = 1.0 - exp(-uFogDensity * vViewDepth * 0.55);
+      fogFactor = clamp(fogFactor, 0.0, 0.65);
+      gl_FragColor = vec4(mix(glow, uFogColor, fogFactor), 1.0);
+      return;
+    }
+
+    vec3 lit = uAmbient;
+    lit += uDirLightColor * max(dot(N, normalize(uDirLightDir)), 0.0);
+
+    if (uUsePointLights > 0.5) {
+      lit += pointLight(uL0Pos, uL0Color, uL0Range, N, vWorldPos);
+      lit += pointLight(uL1Pos, uL1Color, uL1Range, N, vWorldPos);
+      lit += pointLight(uL2Pos, uL2Color, uL2Range, N, vWorldPos);
+      lit += pointLight(uL3Pos, uL3Color, uL3Range, N, vWorldPos);
+    }
+
+    vec3 color = base * lit;
+    // Level 4: color-shifting mineral strata and luminous veins across the terrain.
+    if (uUsePointLights > 0.5 && vWorldPos.y < 7.0 && N.y > 0.3) {
+      float swirls = sin(vWorldPos.x * 0.43 + sin(vWorldPos.z * 0.31) * 2.0);
+      float veins = pow(max(0.0, sin(vWorldPos.x * 1.7 + vWorldPos.z * 1.15 + sin(vWorldPos.z*0.6))), 28.0);
+      vec3 tint = mix(vec3(0.85, 0.63, 1.12), vec3(0.52, 1.19, 1.20), swirls * 0.5 + 0.5);
+      color *= tint;
+      color += vec3(0.02, 0.28, 0.30) * veins * (0.4 + 0.35*sin(uTime*1.6 + vWorldPos.x));
+    }
+    float fogFactor = 1.0 - exp(-uFogDensity * vViewDepth);
+    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    color = mix(color, uFogColor, fogFactor);
+    gl_FragColor = vec4(color, 1.0);
   }
 `;
 
@@ -76,6 +205,40 @@ const uModel = gl.getUniformLocation(program, 'uModel');
 const uView = gl.getUniformLocation(program, 'uView');
 const uProjection = gl.getUniformLocation(program, 'uProjection');
 const uTint = gl.getUniformLocation(program, 'uTint');
+const uEmissive = gl.getUniformLocation(program, 'uEmissive');
+const uAmbient = gl.getUniformLocation(program, 'uAmbient');
+const uDirLightDir = gl.getUniformLocation(program, 'uDirLightDir');
+const uDirLightColor = gl.getUniformLocation(program, 'uDirLightColor');
+const uFogColor = gl.getUniformLocation(program, 'uFogColor');
+const uFogDensity = gl.getUniformLocation(program, 'uFogDensity');
+const uUsePointLights = gl.getUniformLocation(program, 'uUsePointLights');
+const uTime = gl.getUniformLocation(program, 'uTime');
+const uSkyMode = gl.getUniformLocation(program, 'uSkyMode');
+const uCameraPos = gl.getUniformLocation(program, 'uCameraPos');
+const uL0Pos = gl.getUniformLocation(program, 'uL0Pos');
+const uL0Color = gl.getUniformLocation(program, 'uL0Color');
+const uL0Range = gl.getUniformLocation(program, 'uL0Range');
+const uL1Pos = gl.getUniformLocation(program, 'uL1Pos');
+const uL1Color = gl.getUniformLocation(program, 'uL1Color');
+const uL1Range = gl.getUniformLocation(program, 'uL1Range');
+const uL2Pos = gl.getUniformLocation(program, 'uL2Pos');
+const uL2Color = gl.getUniformLocation(program, 'uL2Color');
+const uL2Range = gl.getUniformLocation(program, 'uL2Range');
+const uL3Pos = gl.getUniformLocation(program, 'uL3Pos');
+const uL3Color = gl.getUniformLocation(program, 'uL3Color');
+const uL3Range = gl.getUniformLocation(program, 'uL3Range');
+
+// basic default lighting for Levels 0–3
+function setBasicLighting() {
+  gl.uniform3fv(uAmbient, [0.35, 0.35, 0.35]);
+  gl.uniform3fv(uDirLightDir, [0.4, 1.0, 0.25]);
+  gl.uniform3fv(uDirLightColor, [0.65, 0.65, 0.65]);
+  gl.uniform3fv(uFogColor, [0.05, 0.03, 0.1]);
+  gl.uniform1f(uFogDensity, 0.0);
+  gl.uniform1f(uUsePointLights, 0.0);
+  gl.uniform1f(uSkyMode, 0.0);
+  gl.uniform1f(uEmissive, 0.0);
+}
 
 // face definitions of unit cube with the vertices and the normals
 const FACE_DEFS = [
@@ -270,6 +433,28 @@ let skyIslands = []; // stationary cube clusters in the sky
 let ufos = [];       // crafting that follow cubic Bezier paths
 let volcanoCubes = []; // rotating cubes erupting from the center
 
+// level 4 atmosphere / lighting state
+let groundPlane = [];  // extended flat surface beyond the heightmapped square
+let skyboxParts = [];  // large cubes forming a nebula skybox
+let crystals = [];     // glowing cube formations that drive point lights
+let pointLights = [];  // runtime light data fed to the shader
+let alienSpirals = []; // cube-only mineral towers and distant rock formations
+let orbitRings = []; // hovering arc fragments, also cube-only
+let shootingStars = []; // moving luminous cube particles
+let comets = []; // steep-falling cube comets with mini-cube fire trails
+
+// making some fun ripples on the ground 
+function groundRipple(x, z, t) {
+  const r = Math.hypot(x, z);
+  // two sine terms make clearer peaks/valleys
+  const wave =
+    Math.sin(r * 1.05 - t * 2.5) * 1.05 +
+    Math.sin(r * 2.1 - t * 2.5) * 0.28;
+  // carrying the ripples across the whole surface
+  const envelope = (0.35 + 0.65 * Math.min(1, r / 3.5)) * Math.exp(-r * 0.0045);
+  return wave * envelope;
+}
+
 // grid options for level 1 and 2
 const GRID_OPTIONS_L1 = [
   { value: '8', label: '8x8' },
@@ -319,8 +504,8 @@ async function loadMaps() {
     colorMap = color;
     heightMap = height;
     mapsReady = true;
-    // if the user has already opened level 2/3 while maps were loading, rebuilding the landscape now
-    if (level === '2' || level === '3') setLevel(level);
+    // if the user already opened level 2/3/4 while maps were loading, rebuild now
+    if (level === '2' || level === '3' || level === '4') setLevel(level);
   } catch (err) {
     console.error(err);
     document.getElementById('status').textContent =
@@ -380,10 +565,12 @@ function buildLandscape(withHeights) {
   const spacing = 1.15;
   for (let row = 0; row < gridSize; row++) {
     for (let col = 0; col < gridSize; col++) {
+      const h = withHeights ? proceduralHeight(col, row, gridSize) : 1.0;
       cubes.push({
         x: (col - (gridSize - 1) / 2) * spacing,
         z: (row - (gridSize - 1) / 2) * spacing,
-        height: withHeights ? proceduralHeight(col, row, gridSize) : 1.0,
+        height: h,
+        baseHeight: h, // kept for Level 4 ripple animation
         tint: alienTint(col, row, gridSize),
         color: null,
       });
@@ -403,10 +590,12 @@ function buildLandscapeFromImages() {
       const grayPix = samplePixel(heightMap, col, row, gridSize);
       // height map is grayscale: using the red channel
       const gray = grayPix.r;
+      const h = grayToHeight(gray);
       cubes.push({
         x: (col - (gridSize - 1) / 2) * spacing,
         z: (row - (gridSize - 1) / 2) * spacing,
-        height: grayToHeight(gray),
+        height: h,
+        baseHeight: h,
         tint: 0.5,
         color: [rgb.r / 255, rgb.g / 255, rgb.b / 255],
       });
@@ -479,6 +668,203 @@ function buildVolcano() {
   }
 }
 
+// level 4: translating this into a seamless ground grid for every cube matches the detail map's size
+// (same spacing / footprint as the NxN heightmap cubes). extra pad rings
+// continuing past the map edge so ripples never hit a size mismatch or water gap.
+function buildSeamlessLevel4Terrain() {
+  const spacing = 1.05; // identical footprint to the NxN detail cubes
+  const pad = 28;       // same-size cubes beyond each edge
+  const total = gridSize + pad * 2;
+  const mapHalf = ((gridSize - 1) / 2) * spacing;
+
+  cubes = [];
+  for (let row = 0; row < total; row++) {
+    for (let col = 0; col < total; col++) {
+      const localCol = col - pad;
+      const localRow = row - pad;
+      const x = (col - (total - 1) / 2) * spacing;
+      const z = (row - (total - 1) / 2) * spacing;
+      // Circular blend (not a square cut) so the plain integrates with the crater
+      const r = Math.hypot(x, z);
+      const outside = Math.max(0, r - mapHalf);
+      const flatten = Math.min(1, outside / (pad * spacing * 0.55));
+
+      let h;
+      let color;
+      if (mapsReady) {
+        // Same sampling as the detail map; clamp at the rim when outside
+        const ic = Math.min(gridSize - 1, Math.max(0, localCol));
+        const ir = Math.min(gridSize - 1, Math.max(0, localRow));
+        const rgb = samplePixel(colorMap, ic, ir, gridSize);
+        const gray = samplePixel(heightMap, ic, ir, gridSize).r;
+        h = grayToHeight(gray);
+        color = [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+        // Soft circular ease to a rippling plain (cube size stays identical everywhere)
+        const n = ((Math.sin(x * 0.35 + z * 0.29) * 43758.5453) % 1 + 1) % 1;
+        const plainH = 0.45 + n * 0.55;
+        h = h * (1 - flatten) + plainH * flatten;
+        color = color.map((c, i) => c * (1 - flatten * 0.22) + [0.22, 0.12, 0.38][i] * flatten * 0.22);
+      } else {
+        const pc = Math.min(gridSize - 1, Math.max(0, localCol));
+        const pr = Math.min(gridSize - 1, Math.max(0, localRow));
+        h = proceduralHeight(pc, pr, gridSize);
+        const n = ((Math.sin(x * 0.35 + z * 0.29) * 43758.5453) % 1 + 1) % 1;
+        h = h * (1 - flatten) + (0.45 + n * 0.55) * flatten;
+        const t = alienTint(pc, pr, gridSize);
+        color = [0.45 + t * 0.2, 0.2 + t * 0.15, 0.65 + t * 0.2];
+      }
+
+      cubes.push({
+        x, z,
+        height: h,
+        baseHeight: h,
+        tint: 0.5,
+        color,
+      });
+    }
+  }
+
+  // Thin under-crust only — no oversized ground tiles
+  groundPlane = [{
+    x: 0, y: -0.6, z: 0,
+    sx: total * spacing + 4, sy: 0.6, sz: total * spacing + 4,
+    color: [0.13, 0.065, 0.24],
+    base: true,
+    baseSy: 0.6,
+  }];
+}
+
+// Kept for any leftover callers; Level 4 uses buildSeamlessLevel4Terrain instead.
+function buildExtendedGround() {
+  buildSeamlessLevel4Terrain();
+}
+
+// Mini comets: brown rocky cube cores + fire trails of tiny cubes.
+function buildComets() {
+  comets = [];
+  const browns = [
+    [0.42, 0.26, 0.14],
+    [0.55, 0.32, 0.16],
+    [0.36, 0.22, 0.12],
+    [0.48, 0.30, 0.18],
+  ];
+  for (let i = 0; i < 18; i++) {
+    comets.push({
+      phase: i / 18,
+      speed: 0.08 + (i % 5) * 0.018,
+      // start high and off to the side, fall diagonally inward
+      x0: -55 + (i % 7) * 16,
+      y0: 26 + (i % 4) * 5,
+      z0: -48 + (i % 6) * 15,
+      dx: 14 + (i % 4) * 7,
+      dy: -30 - (i % 4) * 5,
+      dz: 8 + (i % 3) * 7,
+      headColor: browns[i % browns.length],
+    });
+  }
+}
+
+// The sky remains a SINGLE cube model. Its inner faces get a procedural
+// starfield/nebula/aurora/planets from the fragment shader, not an image texture.
+function buildSkybox() {
+  skyboxParts = [{x:0,y:0,z:0,sx:700,sy:700,sz:700,sky:true}];
+}
+
+// Varied rock formations; all parts are stretched and transformed cubes.
+function buildAlienFormations() {
+  alienSpirals = [];
+  const palette=[[0.48,0.19,0.72],[0.14,0.68,0.74],[0.76,0.30,0.62],[0.28,0.37,0.86]];
+  for(let i=0;i<15;i++) {
+    const a=i*2.399963;
+    const r=22+(i%5)*8;
+    const x=Math.cos(a)*r,z=Math.sin(a)*r;
+    const n=3+(i%5);
+    for(let j=0;j<n;j++) {
+      alienSpirals.push({x:x+Math.sin(j*1.7)*0.45,z:z+Math.cos(j*1.7)*0.45,
+        y:j*0.72,sx:1.0-j*0.09,sy:1.05,sz:1.0-j*0.09,
+        yaw:a+j*0.42,color:palette[i%4],glow:j===n-1});
+    }
+  }
+  // Ancient hovering fragmented ring in the distance.
+  orbitRings=[];
+  for(let i=0;i<52;i++) {
+    const a=i/52*Math.PI*2;
+    orbitRings.push({a, radius:10.0+Math.sin(i*3.2)*0.3,
+      color:i%3===0?[0.23,0.95,0.86]:[0.74,0.27,0.89]});
+  }
+  shootingStars=[];
+  for(let i=0;i<18;i++) shootingStars.push({
+    phase:i/18, speed:0.055+(i%5)*0.014,
+    x:-65+(i%7)*18, z:-45+(i%6)*17,
+    height:22+(i%4)*6, color:i%2?[0.35,0.95,1.0]:[0.99,0.52,0.95]
+  });
+}
+
+function drawAlienFormations(seconds) {
+  for(const p of alienSpirals) {
+    drawCubeTRS(p.x,p.y,p.z,p.yaw,p.sx,p.sy,p.sz,0,0,0,p.color,p.glow?1:0);
+  }
+  for(const p of orbitRings) {
+    const a=p.a+seconds*0.06;
+    const x=Math.cos(a)*p.radius,z=Math.sin(a)*p.radius;
+    const y=11.5+Math.sin(a*3+seconds*0.4)*0.65;
+    drawCubeTRS(x,y,z,-a,0.32,0.25,1.12,0,0,0,p.color,1);
+  }
+  for(const p of shootingStars) {
+    const t=(p.phase+seconds*p.speed)%1;
+    const x=p.x+t*85, z=p.z+t*18;
+    const y=p.height-t*6;
+    if(t>0.83)continue;
+    drawCubeTRS(x,y,z,0.2,0.22,0.22,0.75,0,0,0,p.color,1);
+    drawCubeTRS(x-0.8,y+0.2,z-0.18,0.2,0.12,0.12,1.5,0,0,0,
+      p.color.map(v=>v*0.35),1);
+  }
+}
+
+// Level 4: bioluminescent crystal formations (also the dynamic point-light sources)
+function buildCrystals() {
+  crystals = [];
+  // Each crystal cluster = a few cubes + one point light at its tip.
+  const sites = [
+    { x: -5.5, z: -3.5, color: [1.0, 0.35, 0.9], light: [1.0, 0.4, 0.95], range: 11 },
+    { x: 6.0, z: 2.5, color: [0.35, 1.0, 0.95], light: [0.35, 1.0, 0.95], range: 12 },
+    { x: -2.0, z: 6.5, color: [1.0, 0.85, 0.35], light: [1.0, 0.75, 0.35], range: 10 },
+    { x: 4.5, z: -6.0, color: [0.55, 0.45, 1.0], light: [0.55, 0.5, 1.0], range: 11 },
+    { x: -11, z: 8, color: [0.3, 0.98, 0.75], light: [0.3, 0.98, 0.75], range: 9 },
+    { x: 12, z: -7, color: [0.99, 0.35, 0.56], light: [0.99, 0.35, 0.56], range: 9 },
+  ];
+
+  for (const s of sites) {
+    // Sample nearby terrain height so crystals sit on the ground instead of floating.
+    let baseY = 1.5;
+    if (cubes.length) {
+      let best = Infinity;
+      for (const c of cubes) {
+        const d = Math.hypot(c.x - s.x, c.z - s.z);
+        if (d < best) {
+          best = d;
+          baseY = c.height;
+        }
+      }
+    }
+    crystals.push({
+      x: s.x,
+      z: s.z,
+      baseY,
+      color: s.color,
+      lightColor: s.light,
+      range: s.range,
+      phase: Math.random() * Math.PI * 2,
+      parts: [
+        { ox: 0, oy: 0, oz: 0, sx: 0.55, sy: 1.4, sz: 0.55 },
+        { ox: 0.35, oy: 0.2, oz: 0.1, sx: 0.35, sy: 2.1, sz: 0.35 },
+        { ox: -0.3, oy: 0.1, oz: -0.25, sx: 0.3, sy: 1.7, sz: 0.3 },
+        { ox: 0.1, oy: 1.5, oz: 0.05, sx: 0.45, sy: 0.45, sz: 0.45 }, // glowing tip
+      ],
+    });
+  }
+}
+
 function setLevel(next) {
   level = next;
   document.getElementById('btnLevel0').classList.toggle('active', level === '0');
@@ -486,6 +872,7 @@ function setLevel(next) {
   document.getElementById('btnLevel1bc').classList.toggle('active', level === '1bc');
   document.getElementById('btnLevel2').classList.toggle('active', level === '2');
   document.getElementById('btnLevel3').classList.toggle('active', level === '3');
+  document.getElementById('btnLevel4').classList.toggle('active', level === '4');
 
   const gridSelect = document.getElementById('gridSelect');
   gridSelect.disabled = level === '0';
@@ -494,8 +881,16 @@ function setLevel(next) {
   skyIslands = [];
   ufos = [];
   volcanoCubes = [];
+  groundPlane = [];
+  skyboxParts = [];
+  crystals = [];
+  pointLights = [];
+  alienSpirals = [];
+  orbitRings = [];
+  shootingStars = [];
+  comets = [];
 
-  if (level === '2' || level === '3') {
+  if (level === '2' || level === '3' || level === '4') {
     if (![16, 24, 32, 40].includes(gridSize)) gridSize = 16;
     setGridOptions(GRID_OPTIONS_L2, gridSize);
   } else if (level === '1a' || level === '1bc') {
@@ -544,6 +939,21 @@ function setLevel(next) {
       document.getElementById('status').textContent =
         `Level 3: Bezier UFOs + volcano cubes, ${gridSize}x${gridSize} landscape`;
     }
+  } else if (level === '4') {
+    // Brighter neutral vertex colors let the sampled PNG palette shine through.
+    rebuildFlatCubeBuffer([0.91, 0.88, 0.98]);
+    buildSkyIslands();
+    buildUfos();
+    buildVolcano();
+    buildSkybox();
+    // One uniform cube grid (detail map in the center + matching pad rings).
+    buildSeamlessLevel4Terrain();
+    buildCrystals();
+    buildAlienFormations();
+    buildComets();
+    document.getElementById('status').textContent = mapsReady
+      ? `Level 4: seamless ${gridSize}×${gridSize} cubes + ripples + comets`
+      : 'Level 4: procedural preview (waiting for image maps)';
   }
 }
 
@@ -552,12 +962,14 @@ document.getElementById('btnLevel1a').addEventListener('click', () => setLevel('
 document.getElementById('btnLevel1bc').addEventListener('click', () => setLevel('1bc'));
 document.getElementById('btnLevel2').addEventListener('click', () => setLevel('2'));
 document.getElementById('btnLevel3').addEventListener('click', () => setLevel('3'));
+document.getElementById('btnLevel4').addEventListener('click', () => setLevel('4'));
 document.getElementById('gridSelect').addEventListener('change', (e) => {
   gridSize = parseInt(e.target.value, 10);
   if (level !== '0') setLevel(level);
 });
 
 setLevel('0');
+setBasicLighting();
 
 // drawing loop
 gl.enable(gl.DEPTH_TEST);
@@ -566,27 +978,29 @@ gl.clearColor(0.05, 0.03, 0.1, 1.0); // deep alien night sky
 const ORBIT_SPEED = 0.35; // radians / second
 let lastSeconds = 0;
 
-function drawCube(cube, sx, sy, sz, tintRgb) {
+function drawCube(cube, sx, sy, sz, tintRgb, emissive) {
   // scaling first, then translation
   const model = multiply(translation(cube.x, 0, cube.z), scaling(sx, sy, sz));
   gl.uniformMatrix4fv(uModel, false, model);
   gl.uniform3fv(uTint, tintRgb);
+  gl.uniform1f(uEmissive, emissive || 0);
   gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
 }
 
 // drawing a cube with translating, rotating, and scaling
-function drawCubeTRS(x, y, z, yaw, sx, sy, sz, localOx, localOy, localOz, tintRgb) {
+function drawCubeTRS(x, y, z, yaw, sx, sy, sz, localOx, localOy, localOz, tintRgb, emissive) {
   let model = scaling(sx, sy, sz);
   model = multiply(translation(localOx, localOy, localOz), model);
   model = multiply(rotationY(yaw), model);
   model = multiply(translation(x, y, z), model);
   gl.uniformMatrix4fv(uModel, false, model);
   gl.uniform3fv(uTint, tintRgb);
+  gl.uniform1f(uEmissive, emissive || 0);
   gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
 }
 
 // centered tumbling cube (for volcano ejecta), rotating around cube center
-function drawTumblingCube(x, y, z, rx, ry, rz, size, tintRgb) {
+function drawTumblingCube(x, y, z, rx, ry, rz, size, tintRgb, emissive) {
   // unit cube is y=0..1, shifting by -0.5 in y so rotations orbit the center
   let model = translation(0, -0.5, 0);
   model = multiply(scaling(size, size, size), model);
@@ -596,6 +1010,7 @@ function drawTumblingCube(x, y, z, rx, ry, rz, size, tintRgb) {
   model = multiply(translation(x, y, z), model);
   gl.uniformMatrix4fv(uModel, false, model);
   gl.uniform3fv(uTint, tintRgb);
+  gl.uniform1f(uEmissive, emissive || 0);
   gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
 }
 
@@ -635,7 +1050,7 @@ function updateAndDrawUfos(dt) {
 }
 
 // a mini air volcano: cubes start below the crater, rise, drift out, tumble a little bit and then reset
-function updateAndDrawVolcano(seconds) {
+function updateAndDrawVolcano(seconds, asLights) {
   const craterY = 0.4;   // emerging from just under the crater center
   const maxHeight = 6.5;
 
@@ -655,8 +1070,164 @@ function updateAndDrawVolcano(seconds) {
 
     // fading ish by shrinking a little bit near the top of the arc
     const size = rock.size * (1 - life * 0.35);
-    drawTumblingCube(x, y, z, rx, ry, rz, size, rock.color);
+    drawTumblingCube(x, y, z, rx, ry, rz, size, rock.color, asLights ? 1 : 0);
   }
+}
+
+function drawGroundPlane(seconds) {
+  for (const g of groundPlane) {
+    if (g.base) {
+      // Huge under-crust stays flat so we never see holes through the world.
+      drawCubeTRS(g.x, g.y, g.z, 0, g.sx, g.sy, g.sz, 0, 0, 0, g.color, 0);
+      continue;
+    }
+    const baseSy = g.baseSy != null ? g.baseSy : g.sy;
+    const sy = Math.max(0.12, baseSy + groundRipple(g.x, g.z, seconds));
+    drawCubeTRS(g.x, g.y, g.z, 0, g.sx, sy, g.sz, 0, 0, 0, g.color, 0);
+  }
+}
+
+function drawRipplingLandscape(seconds) {
+  for (const cube of cubes) {
+    const base = cube.baseHeight != null ? cube.baseHeight : cube.height;
+    const h = Math.max(0.12, base + groundRipple(cube.x, cube.z, seconds));
+    drawCube(cube, 1, h, 1, cube.color || [1, 1, 1], 0);
+  }
+}
+
+// Steep-falling cube comets with a mini-cube fire trail (orange → red fade).
+function updateAndDrawComets(seconds) {
+  const fireColors = [
+    [1.0, 0.95, 0.55],
+    [1.0, 0.7, 0.2],
+    [1.0, 0.4, 0.1],
+    [0.85, 0.15, 0.05],
+  ];
+  for (const c of comets) {
+    let t = (c.phase + seconds * c.speed) % 1;
+    // Pause briefly after impact before respawning
+    if (t > 0.88) continue;
+
+    const x = c.x0 + c.dx * t;
+    const y = c.y0 + c.dy * t;
+    const z = c.z0 + c.dz * t;
+    if (y < -1) continue;
+
+    // Glowing icy/rocky head
+    drawCubeTRS(x, y, z, t * 4.0, 0.55, 0.45, 0.55, 0, 0, 0, c.headColor, 1);
+
+    // Fire trail: mini cubes stretched backward along the velocity
+    const trailN = 8;
+    for (let i = 1; i <= trailN; i++) {
+      const u = i / trailN;
+      const bx = x - c.dx * u * 0.045;
+      const by = y - c.dy * u * 0.045;
+      const bz = z - c.dz * u * 0.045;
+      const size = 0.28 * (1 - u * 0.75);
+      const col = fireColors[Math.min(fireColors.length - 1, Math.floor(u * fireColors.length))];
+      // slight sideways jitter so the trail looks like sparks, not a line
+      const jx = Math.sin(seconds * 18 + i * 2.1 + c.phase * 9) * 0.12 * u;
+      const jz = Math.cos(seconds * 16 + i * 1.7) * 0.12 * u;
+      drawCubeTRS(bx + jx, by, bz + jz, 0.4, size, size * 1.4, size, 0, 0, 0, col, 1);
+    }
+  }
+}
+
+function drawSkybox(eye) {
+  // Render the inside of a large cube centered on the camera (so it never
+  // looks like a small rectangular room). Ignore scene depth just for the sky.
+  gl.disable(gl.DEPTH_TEST);
+  gl.depthMask(false);
+  gl.uniform1f(uSkyMode,1.0);
+  drawCubeTRS(eye[0],eye[1]-350,eye[2],0,700,700,700,0,0,0,[1,1,1],0);
+  gl.uniform1f(uSkyMode,0.0);
+  gl.depthMask(true);
+  gl.enable(gl.DEPTH_TEST);
+}
+
+function updateCrystalLights(seconds) {
+  pointLights = [];
+  for (const c of crystals) {
+    const pulse = 0.72 + 0.28 * Math.sin(seconds * 2.2 + c.phase);
+    c._pulse = pulse;
+    const tip = c.parts[c.parts.length - 1];
+    const lift = groundRipple(c.x, c.z, seconds);
+    pointLights.push({
+      pos: [c.x + tip.ox, c.baseY + lift + tip.oy + tip.sy * 0.5, c.z + tip.oz],
+      color: [
+        c.lightColor[0] * pulse * 2.2,
+        c.lightColor[1] * pulse * 2.2,
+        c.lightColor[2] * pulse * 2.2,
+      ],
+      range: c.range * 1.15,
+    });
+  }
+  // Fourth local light travels with the lead UFO along its Bezier flight path.
+  // The other three slots are occupied by the nearest three crystal sites.
+  if (ufos.length) {
+    const craft=ufos[0];
+    const pos=cubicBezier(craft.p0,craft.p1,craft.p2,craft.p3,craft.t);
+    pointLights[3]={pos:[pos[0],pos[1]-0.6,pos[2]],
+      color:[0.18,0.92,0.90],range:9.0};
+  }
+}
+
+function drawCrystals(seconds) {
+  for (const c of crystals) {
+    const pulse = c._pulse || 1;
+    const lift = seconds != null ? groundRipple(c.x, c.z, seconds) : 0;
+    for (let i = 0; i < c.parts.length; i++) {
+      const p = c.parts[i];
+      const isTip = i === c.parts.length - 1;
+      const col = isTip
+        ? [c.color[0] * pulse, c.color[1] * pulse, c.color[2] * pulse]
+        : c.color;
+      drawCubeTRS(
+        c.x + p.ox, c.baseY + lift + p.oy, c.z + p.oz, 0,
+        p.sx, p.sy, p.sz, 0, 0, 0, col, 1
+      );
+    }
+  }
+}
+
+function uploadPointLights() {
+  const lights = [
+    { posLoc: uL0Pos, colLoc: uL0Color, rangeLoc: uL0Range },
+    { posLoc: uL1Pos, colLoc: uL1Color, rangeLoc: uL1Range },
+    { posLoc: uL2Pos, colLoc: uL2Color, rangeLoc: uL2Range },
+    { posLoc: uL3Pos, colLoc: uL3Color, rangeLoc: uL3Range },
+  ];
+  for (let i = 0; i < 4; i++) {
+    const L = pointLights[i];
+    if (L) {
+      gl.uniform3fv(lights[i].posLoc, L.pos);
+      gl.uniform3fv(lights[i].colLoc, L.color);
+      gl.uniform1f(lights[i].rangeLoc, L.range);
+    } else {
+      gl.uniform3fv(lights[i].posLoc, [0, -100, 0]);
+      gl.uniform3fv(lights[i].colLoc, [0, 0, 0]);
+      gl.uniform1f(lights[i].rangeLoc, 0.01);
+    }
+  }
+}
+
+function setLevel4Lighting(seconds) {
+  // Colored global illumination changes smoothly, without a day/night toggle.
+  const a=seconds*0.20;
+  gl.uniform3fv(uAmbient, [0.20+0.035*Math.sin(a),
+    0.14+0.035*Math.sin(a+2.1),0.28+0.05*Math.sin(a+4.1)]);
+  gl.uniform3fv(uDirLightDir, [
+    Math.sin(seconds * 0.15) * 0.35,
+    0.85,
+    Math.cos(seconds * 0.15) * 0.35,
+  ]);
+  gl.uniform3fv(uDirLightColor, [0.28+0.10*Math.sin(seconds*0.12),
+    0.22+0.08*Math.sin(seconds*0.12+2.0),
+    0.40+0.10*Math.sin(seconds*0.12+4.0)]);
+  gl.uniform3fv(uFogColor, [0.28,0.075,0.31]);
+  gl.uniform1f(uFogDensity, 0.008); // low haze: the horizon stays visible
+  gl.uniform1f(uUsePointLights, 1.0);
+  uploadPointLights();
 }
 
 function render(timeMs) {
@@ -664,13 +1235,25 @@ function render(timeMs) {
   const dt = Math.min(0.05, Math.max(0, seconds - lastSeconds));
   lastSeconds = seconds;
 
-  canvas.width = canvas.clientWidth;
-  canvas.height = canvas.clientHeight;
+  // Cap backing resolution for smoother performance on high-density laptops.
+  const pixelRatio=Math.min(window.devicePixelRatio||1,1.5);
+  const targetW=Math.max(1,Math.round(canvas.clientWidth*pixelRatio));
+  const targetH=Math.max(1,Math.round(canvas.clientHeight*pixelRatio));
+  if(canvas.width!==targetW) canvas.width=targetW;
+  if(canvas.height!==targetH) canvas.height=targetH;
   gl.viewport(0, 0, canvas.width, canvas.height);
+
+  if (level === '4') {
+    gl.clearColor(0.35, 0.08, 0.42, 1.0); // magenta haze clear
+  } else {
+    gl.clearColor(0.05, 0.03, 0.1, 1.0);
+  }
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
   const aspect = canvas.width / canvas.height;
-  gl.uniformMatrix4fv(uProjection, false, perspective(Math.PI / 4, aspect, 0.1, 200));
+  gl.uniformMatrix4fv(uProjection, false, perspective(Math.PI / 4, aspect, 0.1, level==='4'?1200:250));
+  gl.uniform1f(uTime,seconds);
+  gl.uniform1f(uSkyMode,0);
 
   // level 1d: orbiting around the look-at (0,0,0)
   let radius;
@@ -683,9 +1266,10 @@ function render(timeMs) {
   } else {
     radius = Math.max(14, gridSize * 1.15);
     height = Math.max(8, gridSize * 0.6);
-    if (level === '3') {
-      height = Math.max(height, 10);
-      lookY = 2.2;
+    if (level === '3' || level === '4') {
+      height = Math.max(height, level === '4' ? 12 : 10);
+      lookY = level === '4' ? 2.5 : 2.2;
+      if (level === '4') radius = Math.max(radius, 22);
     } else {
       lookY = level === '2' ? 1.2 : 0;
     }
@@ -698,18 +1282,22 @@ function render(timeMs) {
     radius * Math.sin(angle),
   ];
   gl.uniformMatrix4fv(uView, false, lookAt(eye, [0, lookY, 0], [0, 1, 0]));
+  gl.uniform3fv(uCameraPos,eye);
 
   enableAttribs();
+
+  if (level !== '4') setBasicLighting();
 
   if (level === '0') {
     // unit cube scaled by 2
     const model = multiply(translation(0, -1, 0), scaling(2, 2, 2));
     gl.uniformMatrix4fv(uModel, false, model);
     gl.uniform3fv(uTint, [1, 1, 1]);
+    gl.uniform1f(uEmissive, 0);
     gl.drawArrays(gl.TRIANGLES, 0, VERTEX_COUNT);
   } else if (level === '1a') {
     for (const cube of cubes) {
-      drawCube(cube, 1, 1, 1, [1, 1, 1]);
+      drawCube(cube, 1, 1, 1, [1, 1, 1], 0);
     }
   } else if (level === '1bc') {
     // 1b: scaling in y. 1c: vertex colors in the buffer + per-cube tint.
@@ -717,19 +1305,31 @@ function render(timeMs) {
       const t = cube.tint;
       // procedural tint: purple to blue to magenta across the grid
       const tintRgb = [0.75 + t * 0.4, 0.55 + t * 0.2, 1.1 - t * 0.25];
-      drawCube(cube, 1, cube.height, 1, tintRgb);
+      drawCube(cube, 1, cube.height, 1, tintRgb, 0);
     }
   } else if (level === '2') {
     for (const cube of cubes) {
-      drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1]);
+      drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1], 0);
     }
   } else if (level === '3') {
     for (const cube of cubes) {
-      drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1]);
+      drawCube(cube, 1, cube.height, 1, cube.color || [1, 1, 1], 0);
     }
     drawSkyIslands();
     updateAndDrawUfos(dt);
-    updateAndDrawVolcano(seconds);
+    updateAndDrawVolcano(seconds, false);
+  } else if (level === '4') {
+    updateCrystalLights(seconds);
+    setLevel4Lighting(seconds);
+    drawSkybox(eye);
+    drawGroundPlane(seconds);
+    drawRipplingLandscape(seconds);
+    drawCrystals(seconds);
+    drawAlienFormations(seconds);
+    drawSkyIslands();
+    updateAndDrawUfos(dt);
+    updateAndDrawVolcano(seconds, true);
+    updateAndDrawComets(seconds);
   }
 
   requestAnimationFrame(render);

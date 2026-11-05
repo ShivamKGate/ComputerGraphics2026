@@ -105,7 +105,13 @@
     <h1>Alien Planet 18</h1>
     <p class="meta">Shivam Sinay Kharangate</p>
     <p class="blurb">
-      A simple purple alien world built only from cubes.
+      A purple alien world built only from cubes.
+      Level 0: one 2×2×2 cube.
+      Level 1a: flat cube grid (translation).
+      Level 1b/c: y-scale heights, vertex colors, orbiting camera.
+      Level 2: color + height map sampling (start low-res, raise toward target).
+      Level 3: sky islands, volcano cubes, UFOs on cubic Bézier paths.
+      Level 4: fog, crystal lights, rippling ground, comets (creative stretch).
     </p>
     <div class="controls">
       <button type="button" id="btnLevel0" class="active">Level 0</button>
@@ -113,6 +119,7 @@
       <button type="button" id="btnLevel1bc">Level 1b/c</button>
       <button type="button" id="btnLevel2">Level 2</button>
       <button type="button" id="btnLevel3">Level 3</button>
+      <button type="button" id="btnLevel4">Level 4</button>
 
       <label for="gridSelect">Grid</label>
       <select id="gridSelect" disabled>
